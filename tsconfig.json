@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",                        // modern JS output
+    "module": "NodeNext",                      // use Node-style ESM
+    "moduleResolution": "NodeNext",            // resolves ESM properly
+    "outDir": "./dist",                        // compiled JS goes here
+    "rootDir": "./src",                        // your source folder
+    "strict": true,                            // all strict checks
+    "sourceMap": true,                         // useful for debugging
+    "esModuleInterop": true,                   // fix default import issues
+    "allowSyntheticDefaultImports": true,      // allow default imports
+    "skipLibCheck": true                       // skip type check for node_modules
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

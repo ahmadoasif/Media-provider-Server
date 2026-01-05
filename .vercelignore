@@ -1,0 +1,18 @@
+# Ignore local development files
+node_modules
+.env
+.env.local
+
+# Ignore uploads directory (use cloud storage for production)
+uploads/
+
+# Ignore development server file (not needed for serverless)
+src/server.ts
+dist/server.js
+
+# Ignore Socket.IO (not supported on Vercel serverless)
+src/socket/
+
+# Keep source files for building
+!src/
+!api/

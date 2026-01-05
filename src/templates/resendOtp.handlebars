@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+  <body style="font-family:Arial, sans-serif; background:#f4f4f7; padding:0; margin:0;">
+    <div style="max-width:600px; margin:40px auto; background:white; border-radius:10px; overflow:hidden; box-shadow:0 2px 10px rgba(0,0,0,0.1);">
+      <div style="background:#c49a6c; color:white; text-align:center; padding:20px; font-size:22px; font-weight:bold;">
+        {{subject}}
+      </div>
+      <div style="padding:30px; text-align:center;">
+        <p>Hello {{name}},</p>
+        <p>We noticed you requested a new OTP. Use the code below to complete your verification. It will expire in 10 minutes.</p>
+        <div style="background:#111827; color:#fff; display:inline-block; padding:14px 26px; border-radius:8px; font-size:26px; letter-spacing:4px; margin-top:20px;">
+          {{otp}}
+        </div>
+        <p style="margin-top:24px; color:#555;">If you didn’t request another OTP, you can safely ignore this email.</p>
+      </div>
+      <div style="background:#f9fafb; text-align:center; padding:15px; color:#777; font-size:12px;">
+        &copy; {{year}} Your App. All rights reserved.
+      </div>
+    </div>
+  </body>
+</html>
