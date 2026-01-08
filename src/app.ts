@@ -12,17 +12,11 @@ const app = express();
 // console.log(authorizedOrigins)
 // Cors
 app.use(cors({
-    origin: ["http://localhost:5173",
-        "http://localhost:3000",
-        "http://localhost:5174",
-        "http://localhost:5175",
-        "https://hotel-booking-platform-lyart.vercel.app"],
-    // origin: [authorizedOrigins as string],
+    origin: true,
     credentials: true
 }));
 
-app.use((req: Request, res: Response, next) =>
-{
+app.use((req: Request, res: Response, next) => {
     console.log(
         `Request Received: ${new Date().toISOString()} - ${req.method} ${req.url}`
     );

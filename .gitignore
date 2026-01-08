@@ -28,4 +28,6 @@ Thumbs.db
 .idea/
 *.swp
 TODO.md
-TODO.md
+# 🖼️ Media specific
+thumbnails/
+uploads/

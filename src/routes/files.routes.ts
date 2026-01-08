@@ -21,31 +21,25 @@ router.get('/', (req, res) => {
   try {
     const relativePath = req.query.path as string || '';
     const username = req.query.username as string;
+    const type = req.query.type as string || 'videos'; // 'videos' or 'pictures'
 
-    let rootDir = ROOT_DIR; // Default to uploads directory
+    let rootDir = ROOT_DIR;
 
-    // If username is provided, use user's system directory
     if (username) {
-      // Construct user-specific paths based on type (from path parameter)
-      if (relativePath.includes('videos') || relativePath === '' || relativePath.startsWith('videos')) {
-        // For videos, use C:\Users\{username}\Videos
-        rootDir = `C:\\Users\\${username}\\Videos`;
-      } else if (relativePath.includes('pictures') || relativePath.startsWith('pictures')) {
-        // For pictures, use C:\Users\{username}\Pictures
+      if (type === 'pictures') {
         rootDir = `C:\\Users\\${username}\\Pictures`;
+      } else if (type === 'music') {
+        rootDir = `C:\\Users\\${username}\\Music`;
       } else {
-        // Default to Videos directory for the user
         rootDir = `C:\\Users\\${username}\\Videos`;
       }
 
       // Ensure the root directory exists
       if (!fs.existsSync(rootDir)) {
-        // Try to create it
         try {
           fs.mkdirSync(rootDir, { recursive: true });
         } catch (mkdirError) {
           console.warn(`Could not create directory ${rootDir}:`, mkdirError);
-          // Fall back to uploads directory
           rootDir = ROOT_DIR;
         }
       }
@@ -73,11 +67,23 @@ router.get('/', (req, res) => {
 
     // Read directory contents
     const items = fs.readdirSync(safePath, { withFileTypes: true })
-      .map(item => ({
-        name: item.name,
-        type: item.isDirectory() ? 'folder' : 'file',
-        path: relativePath ? `${relativePath}/${item.name}` : item.name
-      }))
+      .map(item => {
+        let size = 0;
+        if (!item.isDirectory()) {
+          try {
+            const itemStat = fs.statSync(path.join(safePath, item.name));
+            size = itemStat.size;
+          } catch (e) { console.error(e); }
+        }
+        return {
+          name: item.name,
+          type: item.isDirectory() ? 'folder' : 'file',
+          path: relativePath ? `${relativePath}/${item.name}` : item.name,
+          size: size,
+          createdAt: item.isDirectory() ? new Date() : fs.statSync(path.join(safePath, item.name)).birthtime
+        };
+      })
+      .filter(item => item.name.toLowerCase() !== 'desktop.ini')
       .sort((a, b) => {
         // Sort folders first, then files alphabetically
         if (a.type !== b.type) {
@@ -108,27 +114,22 @@ router.get('/serve', (req, res) => {
   try {
     const username = req.query.username as string;
     const filePath = req.query.path as string;
+    const type = req.query.type as string || 'videos';
 
     if (!username || !filePath) {
       return res.status(400).json({ success: false, error: 'Username and file path required' });
     }
 
-    // Determine the root directory based on file path
-    let rootDir = ROOT_DIR;
-    if (username) {
-      if (filePath.includes('pictures') || filePath.startsWith('pictures')) {
-        rootDir = `C:\\Users\\${username}\\Pictures`;
-      } else {
-        // Default to Videos for any other path when username is provided
-        rootDir = `C:\\Users\\${username}\\Videos`;
-      }
+    // Determine root directory based on type
+    let rootDir = `C:\\Users\\${username}\\Videos`;
+    if (type === 'pictures') {
+      rootDir = `C:\\Users\\${username}\\Pictures`;
     }
 
-    // Resolve the full file path
-    const fullPath = path.join(rootDir, filePath);
+    // Resolve the file path
+    const resolvedPath = path.resolve(path.join(rootDir, filePath));
 
-    // Security check: ensure the path is within the allowed directory
-    const resolvedPath = path.resolve(fullPath);
+    // Security check
     if (!resolvedPath.startsWith(rootDir)) {
       return res.status(403).json({ success: false, error: 'Access denied' });
     }
@@ -144,6 +145,7 @@ router.get('/serve', (req, res) => {
     // Determine content type based on file extension
     const ext = path.extname(resolvedPath).toLowerCase();
     let contentType = 'application/octet-stream'; // default
+
     if (['.mp4', '.mkv', '.avi', '.mov'].includes(ext)) {
       contentType = 'video/mp4';
     } else if (['.jpg', '.jpeg'].includes(ext)) {
@@ -154,26 +156,30 @@ router.get('/serve', (req, res) => {
       contentType = 'image/gif';
     } else if (ext === '.webp') {
       contentType = 'image/webp';
-    } else if (ext === '.bmp') {
-      contentType = 'image/bmp';
+    } else if (ext === '.mp3') {
+      contentType = 'audio/mpeg';
+    } else if (ext === '.wav') {
+      contentType = 'audio/wav';
+    } else if (ext === '.ogg') {
+      contentType = 'audio/ogg';
     }
 
-    res.setHeader('Content-Type', contentType);
-    res.setHeader('Content-Length', stat.size);
-
-    // Handle range requests for videos
+    // Handle range requests for video streaming
     if (contentType.startsWith('video/')) {
-      res.setHeader('Accept-Ranges', 'bytes');
       const range = req.headers.range;
+
       if (range) {
-        const parts = range.replace(/bytes=/, '').split('-');
+        const parts = range.replace(/bytes=/, "").split("-");
         const start = parseInt(parts[0], 10);
         const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
         const chunksize = (end - start) + 1;
 
-        res.status(206);
-        res.setHeader('Content-Range', `bytes ${start}-${end}/${stat.size}`);
-        res.setHeader('Content-Length', chunksize);
+        res.writeHead(206, {
+          'Content-Range': `bytes ${start}-${end}/${stat.size}`,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': chunksize,
+          'Content-Type': contentType,
+        });
 
         const stream = fs.createReadStream(resolvedPath, { start, end });
         stream.pipe(res);
@@ -197,7 +203,7 @@ router.get('/serve', (req, res) => {
 // POST /api/files/create-folder - Create a new folder
 router.post('/create-folder', (req, res) => {
   try {
-    const { username, folderName } = req.body;
+    const { username, folderName, type } = req.body;
 
     if (!username || !folderName) {
       return res.status(400).json({
@@ -206,29 +212,36 @@ router.post('/create-folder', (req, res) => {
       });
     }
 
-    // Validate folder name (basic validation)
-    if (folderName.includes('..') || folderName.includes('/') || folderName.includes('\\')) {
+    // Sanitize folder name (remove special characters)
+    const safeFolderName = folderName.replace(/[^a-zA-Z0-9-_ ]/g, '');
+
+    if (!safeFolderName) {
       return res.status(400).json({
         success: false,
         error: 'Invalid folder name'
       });
     }
 
-    // Create the full path for the new folder
-    const videosDir = `C:\\Users\\${username}\\Videos`;
-    const newFolderPath = path.join(videosDir, folderName);
-
-    // Check if Videos directory exists
-    if (!fs.existsSync(videosDir)) {
-      // Create Videos directory if it doesn't exist
-      fs.mkdirSync(videosDir, { recursive: true });
+    // Use user's directory based on type
+    let rootDir = `C:\\Users\\${username}\\Videos`;
+    if (type === 'pictures') {
+      rootDir = `C:\\Users\\${username}\\Pictures`;
+    } else if (type === 'music') {
+      rootDir = `C:\\Users\\${username}\\Music`;
     }
+
+    // Ensure root directory exists
+    if (!fs.existsSync(rootDir)) {
+      fs.mkdirSync(rootDir, { recursive: true });
+    }
+
+    const newFolderPath = path.join(rootDir, safeFolderName);
 
     // Check if folder already exists
     if (fs.existsSync(newFolderPath)) {
       return res.status(409).json({
         success: false,
-        error: 'Folder already exists'
+        error: `Folder '${safeFolderName}' already exists`
       });
     }
 
@@ -251,9 +264,192 @@ router.post('/create-folder', (req, res) => {
   }
 });
 
+// PUT /api/files/rename - Rename a file
+router.put('/rename', (req, res) => {
+  try {
+    const { username, oldPath, newName, type } = req.body;
+
+    if (!username || !oldPath || !newName) {
+      return res.status(400).json({
+        success: false,
+        error: 'Username, oldPath, and newName are required'
+      });
+    }
+
+    // Determine root directory based on type
+    let rootDir = `C:\\Users\\${username}\\Videos`;
+    if (type === 'pictures') {
+      rootDir = `C:\\Users\\${username}\\Pictures`;
+    } else if (type === 'music') {
+      rootDir = `C:\\Users\\${username}\\Music`;
+    }
+
+    // Resolve old file path
+    const oldFilePath = path.resolve(path.join(rootDir, oldPath));
+
+    // Security check
+    if (!oldFilePath.startsWith(rootDir)) {
+      return res.status(403).json({ success: false, error: 'Access denied' });
+    }
+
+    // Check if old file exists
+    if (!fs.existsSync(oldFilePath)) {
+      return res.status(404).json({ success: false, error: 'File not found' });
+    }
+
+    // Get the directory and extension of the old file
+    const directory = path.dirname(oldFilePath);
+    const extension = path.extname(oldFilePath);
+
+    // Create new file path with same extension
+    const newFileName = newName.endsWith(extension) ? newName : `${newName}${extension}`;
+    const newFilePath = path.join(directory, newFileName);
+
+    // Check if new file name already exists
+    if (fs.existsSync(newFilePath)) {
+      return res.status(409).json({
+        success: false,
+        error: 'A file with this name already exists'
+      });
+    }
+
+    // Rename the file
+    fs.renameSync(oldFilePath, newFilePath);
+
+    // Calculate new relative path
+    const newRelativePath = path.relative(rootDir, newFilePath).replace(/\\/g, '/');
+
+    res.json({
+      success: true,
+      message: 'File renamed successfully',
+      newPath: newRelativePath,
+      newName: newFileName
+    });
+
+  } catch (error) {
+    console.error('Error renaming file:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// DELETE /api/files/bulk-delete - Delete multiple files
+router.delete('/bulk-delete', (req, res) => {
+  try {
+    const { username, paths, type } = req.body;
+
+    if (!username || !paths || !Array.isArray(paths)) {
+      return res.status(400).json({ success: false, error: 'Username and paths array required' });
+    }
+
+    const results = {
+      success: [] as string[],
+      failed: [] as { path: string, error: string }[]
+    };
+
+    for (const filePath of paths) {
+      try {
+        // Determine root directory based on type
+        let rootDir = `C:\\Users\\${username}\\Videos`;
+        if (type === 'pictures') {
+          rootDir = `C:\\Users\\${username}\\Pictures`;
+        } else if (type === 'music') {
+          rootDir = `C:\\Users\\${username}\\Music`;
+        }
+
+        // Resolve the file path
+        const resolvedPath = path.resolve(path.join(rootDir, filePath));
+
+        // Security check
+        if (!resolvedPath.startsWith(rootDir)) {
+          results.failed.push({ path: filePath, error: 'Access denied' });
+          continue;
+        }
+
+        // Check if file exists
+        if (!fs.existsSync(resolvedPath)) {
+          results.failed.push({ path: filePath, error: 'File not found' });
+          continue;
+        }
+
+        // Delete the file
+        fs.unlinkSync(resolvedPath);
+        results.success.push(filePath);
+      } catch (err: any) {
+        results.failed.push({ path: filePath, error: err.message });
+      }
+    }
+
+    res.json({
+      success: results.failed.length === 0,
+      results
+    });
+
+  } catch (error) {
+    console.error('Error in bulk delete:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+// DELETE /api/files/delete - Delete a file
+router.delete('/delete', (req, res) => {
+  try {
+    const username = req.query.username as string;
+    const filePath = req.query.path as string;
+    const type = req.query.type as string || 'videos';
+
+    if (!username || !filePath) {
+      return res.status(400).json({ success: false, error: 'Username and file path required' });
+    }
+
+    // Determine root directory based on type
+    let rootDir = `C:\\Users\\${username}\\Videos`;
+    if (type === 'pictures') {
+      rootDir = `C:\\Users\\${username}\\Pictures`;
+    } else if (type === 'music') {
+      rootDir = `C:\\Users\\${username}\\Music`;
+    }
+
+    // Resolve the file path
+    const resolvedPath = path.resolve(path.join(rootDir, filePath));
+
+    // Security check
+    if (!resolvedPath.startsWith(rootDir)) {
+      return res.status(403).json({ success: false, error: 'Access denied' });
+    }
+
+    // Check if file exists
+    if (!fs.existsSync(resolvedPath)) {
+      return res.status(404).json({ success: false, error: 'File not found' });
+    }
+
+    // Delete the file
+    fs.unlinkSync(resolvedPath);
+
+    res.json({
+      success: true,
+      message: 'File deleted successfully'
+    });
+
+  } catch (error) {
+    console.error('Error deleting file:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
 // Example: GET /api/files?path=videos
 // Example: GET /api/files?path=documents/reports
 // Example: GET /api/files/serve?username=ahmed&path=videos/sample.mp4
 // Example: POST /api/files/create-folder
+// Example: PUT /api/files/rename
+// Example: DELETE /api/files/delete?username=ahmed&path=videos/sample.mp4
 
 export default router;
