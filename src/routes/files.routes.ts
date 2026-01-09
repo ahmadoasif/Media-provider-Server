@@ -6,6 +6,8 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+import { generateThumbnail } from '../utils/thumbnailProvider.js';
+
 const router = express.Router();
 
 // Root directory (change this to your actual data directory)
@@ -17,11 +19,14 @@ if (!fs.existsSync(ROOT_DIR)) {
 }
 
 // GET /api/files - List files and folders in a directory
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   try {
     const relativePath = req.query.path as string || '';
     const username = req.query.username as string;
     const type = req.query.type as string || 'videos'; // 'videos' or 'pictures'
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 50;
+    const skip = (page - 1) * limit;
 
     let rootDir = ROOT_DIR;
 
@@ -37,7 +42,7 @@ router.get('/', (req, res) => {
       // Ensure the root directory exists
       if (!fs.existsSync(rootDir)) {
         try {
-          fs.mkdirSync(rootDir, { recursive: true });
+          await fs.promises.mkdir(rootDir, { recursive: true });
         } catch (mkdirError) {
           console.warn(`Could not create directory ${rootDir}:`, mkdirError);
           rootDir = ROOT_DIR;
@@ -58,7 +63,9 @@ router.get('/', (req, res) => {
     }
 
     // Check if directory exists
-    if (!fs.existsSync(safePath)) {
+    try {
+      await fs.promises.access(safePath);
+    } catch (error) {
       return res.status(404).json({
         success: false,
         error: `Directory not found: ${safePath}`
@@ -66,35 +73,71 @@ router.get('/', (req, res) => {
     }
 
     // Read directory contents
-    const items = fs.readdirSync(safePath, { withFileTypes: true })
-      .map(item => {
-        let size = 0;
-        if (!item.isDirectory()) {
-          try {
-            const itemStat = fs.statSync(path.join(safePath, item.name));
-            size = itemStat.size;
-          } catch (e) { console.error(e); }
-        }
-        return {
-          name: item.name,
-          type: item.isDirectory() ? 'folder' : 'file',
-          path: relativePath ? `${relativePath}/${item.name}` : item.name,
-          size: size,
-          createdAt: item.isDirectory() ? new Date() : fs.statSync(path.join(safePath, item.name)).birthtime
-        };
-      })
+    const dirEntries = await fs.promises.readdir(safePath, { withFileTypes: true });
+
+    // Filter and sort first
+    const filteredEntries = dirEntries
       .filter(item => item.name.toLowerCase() !== 'desktop.ini')
       .sort((a, b) => {
         // Sort folders first, then files alphabetically
-        if (a.type !== b.type) {
-          return a.type === 'folder' ? -1 : 1;
+        if (a.isDirectory() !== b.isDirectory()) {
+          return a.isDirectory() ? -1 : 1;
         }
         return a.name.localeCompare(b.name);
       });
 
+    const totalItems = filteredEntries.length;
+    const pagedEntries = filteredEntries.slice(skip, skip + limit);
+
+    // Get stats for paged items only
+    const items = await Promise.all(pagedEntries.map(async (item) => {
+      let size = 0;
+      let createdAt = new Date();
+
+      try {
+        const itemPath = path.join(safePath, item.name);
+        const itemStat = await fs.promises.stat(itemPath);
+        size = itemStat.size;
+        createdAt = itemStat.birthtime;
+      } catch (e) {
+        console.error(`Error getting stats for ${item.name}:`, e);
+      }
+
+      const isVideo = /\.(mp4|mkv|avi|mov)$/i.test(item.name);
+      let thumbnail = null;
+      if (isVideo) {
+        const thumbName = item.name.replace(path.extname(item.name), '.jpg');
+        const thumbPath = path.join(process.cwd(), 'thumbnails', thumbName);
+        thumbnail = `/thumbnails/${thumbName}`;
+
+        // Trigger thumbnail generation if it doesn't exist
+        fs.promises.access(thumbPath).catch(() => {
+          const itemPath = path.join(safePath, item.name);
+          generateThumbnail(itemPath, thumbPath).catch(err => {
+            console.error(`Background thumbnail generation failed for ${item.name}:`, err);
+          });
+        });
+      }
+
+      return {
+        name: item.name,
+        type: item.isDirectory() ? 'folder' : 'file',
+        path: relativePath ? `${relativePath}/${item.name}` : item.name,
+        size: size,
+        createdAt: createdAt,
+        thumbnail: thumbnail
+      };
+    }));
+
     res.json({
       success: true,
       data: items,
+      pagination: {
+        total: totalItems,
+        page,
+        limit,
+        totalPages: Math.ceil(totalItems / limit)
+      },
       currentPath: relativePath,
       rootPath: rootDir,
       username: username
@@ -110,7 +153,7 @@ router.get('/', (req, res) => {
 });
 
 // GET /api/files/serve - Serve files (videos and images)
-router.get('/serve', (req, res) => {
+router.get('/serve', async (req, res) => {
   try {
     const username = req.query.username as string;
     const filePath = req.query.path as string;
@@ -134,20 +177,28 @@ router.get('/serve', (req, res) => {
       return res.status(403).json({ success: false, error: 'Access denied' });
     }
 
-    // Check if file exists
-    if (!fs.existsSync(resolvedPath)) {
+    // Check if file exists and get stats
+    let stat;
+    try {
+      stat = await fs.promises.stat(resolvedPath);
+    } catch (error) {
       return res.status(404).json({ success: false, error: 'File not found' });
     }
-
-    // Get file stats
-    const stat = fs.statSync(resolvedPath);
 
     // Determine content type based on file extension
     const ext = path.extname(resolvedPath).toLowerCase();
     let contentType = 'application/octet-stream'; // default
 
-    if (['.mp4', '.mkv', '.avi', '.mov'].includes(ext)) {
+    if (ext === '.mp4') {
       contentType = 'video/mp4';
+    } else if (ext === '.mkv') {
+      contentType = 'video/x-matroska';
+    } else if (ext === '.avi') {
+      contentType = 'video/x-msvideo';
+    } else if (ext === '.mov') {
+      contentType = 'video/quicktime';
+    } else if (ext === '.webm') {
+      contentType = 'video/webm';
     } else if (['.jpg', '.jpeg'].includes(ext)) {
       contentType = 'image/jpeg';
     } else if (ext === '.png') {
@@ -164,14 +215,20 @@ router.get('/serve', (req, res) => {
       contentType = 'audio/ogg';
     }
 
-    // Handle range requests for video streaming
-    if (contentType.startsWith('video/')) {
+    // Handle range requests for video/audio streaming
+    if (contentType.startsWith('video/') || contentType.startsWith('audio/')) {
       const range = req.headers.range;
 
       if (range) {
         const parts = range.replace(/bytes=/, "").split("-");
         const start = parseInt(parts[0], 10);
         const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
+
+        if (start >= stat.size) {
+          res.status(416).send('Requested range not satisfiable');
+          return;
+        }
+
         const chunksize = (end - start) + 1;
 
         res.writeHead(206, {
@@ -185,23 +242,33 @@ router.get('/serve', (req, res) => {
         stream.pipe(res);
       } else {
         // Stream the entire file
+        res.writeHead(200, {
+          'Content-Length': stat.size,
+          'Content-Type': contentType,
+        });
         const stream = fs.createReadStream(resolvedPath);
         stream.pipe(res);
       }
     } else {
       // For images and other files, send directly
+      res.writeHead(200, {
+        'Content-Length': stat.size,
+        'Content-Type': contentType,
+      });
       const stream = fs.createReadStream(resolvedPath);
       stream.pipe(res);
     }
 
   } catch (error) {
     console.error('Error serving file:', error);
-    res.status(500).json({ success: false, error: 'Internal server error' });
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: 'Internal server error' });
+    }
   }
 });
 
 // POST /api/files/create-folder - Create a new folder
-router.post('/create-folder', (req, res) => {
+router.post('/create-folder', async (req, res) => {
   try {
     const { username, folderName, type } = req.body;
 
@@ -231,22 +298,27 @@ router.post('/create-folder', (req, res) => {
     }
 
     // Ensure root directory exists
-    if (!fs.existsSync(rootDir)) {
-      fs.mkdirSync(rootDir, { recursive: true });
+    try {
+      await fs.promises.access(rootDir);
+    } catch (error) {
+      await fs.promises.mkdir(rootDir, { recursive: true });
     }
 
     const newFolderPath = path.join(rootDir, safeFolderName);
 
     // Check if folder already exists
-    if (fs.existsSync(newFolderPath)) {
+    try {
+      await fs.promises.access(newFolderPath);
       return res.status(409).json({
         success: false,
         error: `Folder '${safeFolderName}' already exists`
       });
+    } catch (error) {
+      // Folder doesn't exist, proceed
     }
 
     // Create the new folder
-    fs.mkdirSync(newFolderPath, { recursive: true });
+    await fs.promises.mkdir(newFolderPath, { recursive: true });
 
     res.json({
       success: true,
@@ -265,7 +337,7 @@ router.post('/create-folder', (req, res) => {
 });
 
 // PUT /api/files/rename - Rename a file
-router.put('/rename', (req, res) => {
+router.put('/rename', async (req, res) => {
   try {
     const { username, oldPath, newName, type } = req.body;
 
@@ -293,7 +365,9 @@ router.put('/rename', (req, res) => {
     }
 
     // Check if old file exists
-    if (!fs.existsSync(oldFilePath)) {
+    try {
+      await fs.promises.access(oldFilePath);
+    } catch (error) {
       return res.status(404).json({ success: false, error: 'File not found' });
     }
 
@@ -306,15 +380,18 @@ router.put('/rename', (req, res) => {
     const newFilePath = path.join(directory, newFileName);
 
     // Check if new file name already exists
-    if (fs.existsSync(newFilePath)) {
+    try {
+      await fs.promises.access(newFilePath);
       return res.status(409).json({
         success: false,
         error: 'A file with this name already exists'
       });
+    } catch (error) {
+      // File doesn't exist, proceed
     }
 
     // Rename the file
-    fs.renameSync(oldFilePath, newFilePath);
+    await fs.promises.rename(oldFilePath, newFilePath);
 
     // Calculate new relative path
     const newRelativePath = path.relative(rootDir, newFilePath).replace(/\\/g, '/');
@@ -336,7 +413,7 @@ router.put('/rename', (req, res) => {
 });
 
 // DELETE /api/files/bulk-delete - Delete multiple files
-router.delete('/bulk-delete', (req, res) => {
+router.delete('/bulk-delete', async (req, res) => {
   try {
     const { username, paths, type } = req.body;
 
@@ -369,13 +446,15 @@ router.delete('/bulk-delete', (req, res) => {
         }
 
         // Check if file exists
-        if (!fs.existsSync(resolvedPath)) {
+        try {
+          await fs.promises.access(resolvedPath);
+        } catch (error) {
           results.failed.push({ path: filePath, error: 'File not found' });
           continue;
         }
 
         // Delete the file
-        fs.unlinkSync(resolvedPath);
+        await fs.promises.unlink(resolvedPath);
         results.success.push(filePath);
       } catch (err: any) {
         results.failed.push({ path: filePath, error: err.message });
@@ -397,7 +476,7 @@ router.delete('/bulk-delete', (req, res) => {
 });
 
 // DELETE /api/files/delete - Delete a file
-router.delete('/delete', (req, res) => {
+router.delete('/delete', async (req, res) => {
   try {
     const username = req.query.username as string;
     const filePath = req.query.path as string;
@@ -424,12 +503,14 @@ router.delete('/delete', (req, res) => {
     }
 
     // Check if file exists
-    if (!fs.existsSync(resolvedPath)) {
+    try {
+      await fs.promises.access(resolvedPath);
+    } catch (error) {
       return res.status(404).json({ success: false, error: 'File not found' });
     }
 
     // Delete the file
-    fs.unlinkSync(resolvedPath);
+    await fs.promises.unlink(resolvedPath);
 
     res.json({
       success: true,

@@ -42,6 +42,9 @@ export const upload = multer({
 
 export const musicProvider = async (req: Request, res: Response) => {
     const userName = req.params.userName as string;
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 50;
+    const skip = (page - 1) * limit;
 
     if (!userName) {
         return badRequestResponse(res, 'User Name is required', null);
@@ -49,41 +52,66 @@ export const musicProvider = async (req: Request, res: Response) => {
 
     const musicDir = path.join('C:', 'Users', userName, 'Music');
 
-    if (!fs.existsSync(musicDir)) {
+    try {
+        await fs.promises.access(musicDir);
+    } catch (error) {
         return notFoundResponse(res, 'Music directory not found.', null);
     }
 
-    // Recursive function to get all music files
-    const getMusicFiles = (dir: string, fileList: any[] = []) => {
-        const files = fs.readdirSync(dir);
-        for (const file of files) {
-            const filePath = path.join(dir, file);
-            const stat = fs.statSync(filePath);
-            if (stat.isDirectory()) {
-                getMusicFiles(filePath, fileList);
-            } else {
-                if (/\.(mp3|wav|ogg|flac|m4a|aac)$/i.test(file)) {
+    // Recursive function to get all music files asynchronously
+    const getMusicFiles = async (dir: string, fileList: any[] = []) => {
+        const files = await fs.promises.readdir(dir, { withFileTypes: true });
+        
+        await Promise.all(files.map(async (file) => {
+            const filePath = path.join(dir, file.name);
+            if (file.isDirectory()) {
+                await getMusicFiles(filePath, fileList);
+            } else if (/\.(mp3|wav|ogg|flac|m4a|aac)$/i.test(file.name)) {
+                try {
+                    const stat = await fs.promises.stat(filePath);
                     fileList.push({
-                        name: file,
-                        path: path.relative(path.join('C:', 'Users', userName, 'Music'), filePath).replace(/\\/g, '/'),
+                        name: file.name,
+                        path: path.relative(musicDir, filePath).replace(/\\/g, '/'),
                         size: stat.size,
                         createdAt: stat.birthtime
                     });
+                } catch (e) {
+                    console.error(`Error getting stats for ${file.name}:`, e);
                 }
             }
-        }
+        }));
+        
         return fileList;
     };
 
     try {
-        const music = getMusicFiles(musicDir).map((item, index) => ({
-            id: `${userName}-music-${index}`,
+        const allMusic = await getMusicFiles(musicDir);
+        
+        // Sort by creation time (newest first)
+        allMusic.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+
+        const totalMusic = allMusic.length;
+        const pagedMusic = allMusic.slice(skip, skip + limit);
+
+        const music = pagedMusic.map((item, index) => ({
+            id: `${userName}-music-${skip + index}`,
             title: item.name,
-            path: item.path, // Relative path for serving
+            path: item.path,
             size: item.size,
-            createdAt: item.createdAt
+            createdAt: item.createdAt.toISOString()
         }));
-        return successResponse(res, 'Music fetched successfully', music);
+
+        return res.status(200).json({
+            success: true,
+            message: 'Music fetched successfully',
+            data: music,
+            pagination: {
+                total: totalMusic,
+                page,
+                limit,
+                totalPages: Math.ceil(totalMusic / limit)
+            }
+        });
     } catch (error) {
         console.error('Error fetching music:', error);
         return successResponse(res, 'Music fetched (empty or error)', []);

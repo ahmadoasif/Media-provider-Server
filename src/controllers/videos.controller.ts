@@ -44,6 +44,9 @@ export const upload = multer({
 });
 export const videosProvider = async (req: Request, res: Response) => {
     const userName = req.params.userName as string;
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 20;
+    const skip = (page - 1) * limit;
 
     if (!userName) {
         return badRequestResponse(res, 'User Name is required', null);
@@ -52,35 +55,57 @@ export const videosProvider = async (req: Request, res: Response) => {
     const videosDir = path.join('C:', 'Users', userName, 'Videos');
     const thumbnailsDir = path.join(process.cwd(), 'thumbnails');
 
-    if (!fs.existsSync(videosDir)) {
+    try {
+        await fs.promises.access(videosDir);
+    } catch (error) {
         return notFoundResponse(res, 'Videos directory not found.', null);
     }
 
     if (!fs.existsSync(thumbnailsDir)) {
-        fs.mkdirSync(thumbnailsDir);
+        await fs.promises.mkdir(thumbnailsDir, { recursive: true });
     }
 
-    const files = fs.readdirSync(videosDir)
-        .filter(file => /\.(mp4|mkv|avi|mov)$/i.test(file));
+    const allFiles = await fs.promises.readdir(videosDir);
+    const videoFiles = allFiles.filter(file => /\.(mp4|mkv|avi|mov)$/i.test(file));
+    
+    const totalVideos = videoFiles.length;
+    const pagedFiles = videoFiles.slice(skip, skip + limit);
 
-    const videos = [];
-
-    for (const file of files) {
+    const videos = await Promise.all(pagedFiles.map(async (file) => {
         const videoPath = path.join(videosDir, file);
         const thumbName = file.replace(path.extname(file), '.jpg');
         const thumbPath = path.join(thumbnailsDir, thumbName);
 
-        if (!fs.existsSync(thumbPath)) {
-            await generateThumbnail(videoPath, thumbPath);
+        // Check if thumbnail exists asynchronously
+        let hasThumbnail = false;
+        try {
+            await fs.promises.access(thumbPath);
+            hasThumbnail = true;
+        } catch (e) {
+            // Thumbnail doesn't exist, trigger generation in background
+            generateThumbnail(videoPath, thumbPath).catch(err => {
+                console.error(`Background thumbnail generation failed for ${file}:`, err);
+            });
         }
 
-        videos.push({
+        return {
             name: file,
-            thumbnail: `/thumbnails/${thumbName}`
-        });
-    }
+            thumbnail: `/thumbnails/${thumbName}`,
+            hasThumbnail: hasThumbnail
+        };
+    }));
 
-    return successResponse(res, 'Videos fetched successfully', videos);
+    return res.status(200).json({
+        success: true,
+        message: 'Videos fetched successfully',
+        data: videos,
+        pagination: {
+            total: totalVideos,
+            page,
+            limit,
+            totalPages: Math.ceil(totalVideos / limit)
+        }
+    });
 };
 
 export const videoUpload = async (req: Request, res: Response) => {
@@ -296,10 +321,18 @@ export const videoDownloadFromUrl = async (req: Request, res: Response) => {
 
         // Find the downloaded file (yt-dlp will name it based on title)
         // Look for files modified in the last 5 minutes to account for merging time
-        const files = fs.readdirSync(videosDir);
-        const downloadedFiles = files
-            .filter(file => fs.statSync(path.join(videosDir, file)).mtime > new Date(Date.now() - 300000))
-            .sort((a, b) => fs.statSync(path.join(videosDir, b)).mtime.getTime() - fs.statSync(path.join(videosDir, a)).mtime.getTime());
+        const files = await fs.promises.readdir(videosDir);
+        const fileStats = await Promise.all(
+            files.map(async (file) => ({
+                file,
+                stat: await fs.promises.stat(path.join(videosDir, file))
+            }))
+        );
+        
+        const downloadedFiles = fileStats
+            .filter(item => item.stat.mtime > new Date(Date.now() - 300000))
+            .sort((a, b) => b.stat.mtime.getTime() - a.stat.mtime.getTime())
+            .map(item => item.file);
 
         // Find the main video file (usually .mp4)
         const downloadedFile = downloadedFiles.find(file =>

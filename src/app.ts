@@ -26,6 +26,7 @@ app.use((req: Request, res: Response, next) => {
 // Body Parser
 app.use(express.json());
 app.use("/uploads", express.static("uploads"));
+app.use("/thumbnails", express.static("thumbnails"));
 
 // Middleware
 app.use("/api", routes);
